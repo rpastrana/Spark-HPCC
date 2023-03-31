@@ -1,3 +1,18 @@
+/*******************************************************************************
+ *     HPCC SYSTEMS software Copyright (C) 2018 HPCC Systems®.
+ *
+ *     Licensed under the Apache License, Version 2.0 (the "License");
+ *     you may not use this file except in compliance with the License.
+ *     You may obtain a copy of the License at
+ *
+ *        http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *     Unless required by applicable law or agreed to in writing, software
+ *     distributed under the License is distributed on an "AS IS" BASIS,
+ *     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *     See the License for the specific language governing permissions and
+ *     limitations under the License.
+ *******************************************************************************/
 /**
  *
  */
@@ -8,24 +23,19 @@ import java.io.Serializable;
 /**
  * The data types for data fields on an HPCC record.
  *
- * @author holtjd
- *
  */
 public enum FieldType implements Serializable {
   INTEGER(true, "Integer", false),
   REAL(true, "Real", false),
+  DECIMAL(true,"Decimal",false),
+  VAR_STRING(true,"VarString",false),
   STRING(true, "String", false),
   BOOLEAN(true, "Boolean", false),
   BINARY(true, "Binary data", false),
   RECORD(false, "Record", true),
-  MISSING(true, "Missing value", false),
-  SET_OF_INTEGER(false, "Set of integers", false),
-  SET_OF_REAL(false, "Set of reals", false),
-  SET_OF_STRING(false, "Set of strings", false),
-  SET_OF_BOOLEAN(false, "Set of Booleans", false),
-  SET_OF_BINARY(false, "Set of Binary strings", false),
-  SEQ_OF_RECORD(false, "Seq of records", true),
-  SET_OF_MISSING(false, "Set of unknown", false);
+  SET(false, "Set", false),             // Set & Dataset are separate because set has a preceding unused byte 
+  DATASET(false, "Set", false),
+  UNKNOWN(true, "Unknown", false);
 
   static final long serialVersionUID = 1L;
   private boolean scalar;
@@ -38,7 +48,7 @@ public enum FieldType implements Serializable {
    * composites.  The primitive types are Boolean, Integer, String,
    * and Real.
    *
-   * The MISSING and SET_OF_MISSING occur when the type information
+   * The UNKNOWN type is used when the type information
    * handled in the TypeDef class is not understood.  Possible
    * underlying types that are not understood include the Foreign
    * data types, QSTRING, bit fields, ECL ENUM.

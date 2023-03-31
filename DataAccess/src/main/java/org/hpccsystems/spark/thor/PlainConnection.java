@@ -1,14 +1,34 @@
+/*******************************************************************************
+ *     HPCC SYSTEMS software Copyright (C) 2018 HPCC Systems®.
+ *
+ *     Licensed under the Apache License, Version 2.0 (the "License");
+ *     you may not use this file except in compliance with the License.
+ *     You may obtain a copy of the License at
+ *
+ *        http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *     Unless required by applicable law or agreed to in writing, software
+ *     distributed under the License is distributed on an "AS IS" BASIS,
+ *     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *     See the License for the specific language governing permissions and
+ *     limitations under the License.
+ *******************************************************************************/
 package org.hpccsystems.spark.thor;
 
 import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.nio.charset.Charset;
 
-import org.hpccsystems.spark.FilePart;
+import javax.net.SocketFactory;
+import javax.net.ssl.SSLSocket;
+import javax.net.ssl.SSLSocketFactory;
+
+import org.apache.log4j.Logger;
 import org.hpccsystems.spark.HpccFileException;
 import org.hpccsystems.spark.RecordDef;
 
 /**
- * @author holtjd
  * The connection to a specific THOR node for a specific file part.
  *
  */
@@ -16,46 +36,65 @@ public class PlainConnection {
   private boolean active;
   private boolean closed;
   private boolean simulateFail;
+  private boolean forceCursorUse;
   private byte[] cursorBin;
   private int handle;
-  private FilePart filePart;
-  private RecordDef recDef;
+  private DataPartition dataPart;
+  private RecordDef recordDefinition;
   private java.io.DataInputStream dis;
   private java.io.DataOutputStream dos;
-  private java.net.Socket sock;
-  //
-  private static final Charset hpccSet = Charset.forName("ISO-8859-1");
-  private static final byte[] hyphen = "-".getBytes(hpccSet);
-  private static final byte[] uc_J = "J".getBytes(hpccSet);
+
+  private Socket  sock;
+  private int currentFilePartCopyIndex;
+  private int DEFAULT_CONNECT_TIMEOUT_MILIS = 1000;
+
+  public static final Charset HPCCCharSet = Charset.forName("ISO-8859-1");
+
+  // Note: The platform may respond with more data than this if records are larger than this limit.
+  public static final int MaxReadSizeKB = 4096;
+
+  private static final Logger log = Logger.getLogger(PlainConnection.class.getName());
   /**
    * A plain socket connect to a THOR node for remote read
-   * @param filePart the remote file name and IP
+   * @param hpccPart the remote file name and IP
    * @param rd the JSON definition for the read input and output
    */
-  public PlainConnection(FilePart fp, RecordDef rd) {
-    this.recDef = rd;
-    this.filePart = fp;
+  public PlainConnection(DataPartition dp, RecordDef rd) {
+    this.recordDefinition = rd;
+    this.dataPart = dp;
     this.active = false;
     this.closed = false;
     this.handle = 0;
     this.cursorBin = new byte[0];
     this.simulateFail = false;
+    this.currentFilePartCopyIndex = 0;
   }
+
+  private boolean setNextFilePartCopy()
+  {
+      if (currentFilePartCopyIndex + 1 >= dataPart.getCopyCount())
+          return false;
+
+      currentFilePartCopyIndex++;
+      return true;
+  }
+
   /**
-   * The remote file name.
-   * @return file name
+   * The SSL usage on the DAFILESRV side
+   * @return use ssl flag
    */
-  public String getFilename() { return this.filePart.getFilename(); }
+  public boolean getUseSSL() { return this.dataPart.getUseSsl(); }
+
   /**
    * The primary IP for the file part
    * @return IP address
    */
-  public String getIP() { return this.filePart.getPrimaryIP(); }
+  public String getIP() { return this.dataPart.getCopyIP(currentFilePartCopyIndex); }
   /**
    * The port number for the remote read service
    * @return port number
    */
-  public int getPort() { return this.filePart.getClearPort(); }
+  public int getPort() { return this.dataPart.getPort(); }
   /**
    * The read transaction in JSON format
    * @return read transaction
@@ -101,6 +140,16 @@ public class PlainConnection {
     return old;
   }
   /**
+   * Force the use of cursors instead of handles for testing.
+   * @param v the setting
+   * @return the previous setting
+   */
+  public boolean setForceCursorUse(boolean v) {
+    boolean old = this.forceCursorUse;
+    this.forceCursorUse = v;
+    return old;
+  }
+  /**
    * Read a block of the remote file from a THOR node
    * @return the block sent by the node
    * @throws HpccFileException a problem with the read operation
@@ -108,8 +157,11 @@ public class PlainConnection {
   public byte[] readBlock()
     throws HpccFileException {
     byte[] rslt = new byte[0];
-    if (this.closed) return rslt;    // no data left to send
-    if (!this.active) makeActive();  // do the first read
+    if (this.closed) return rslt; // no data left to send
+    if (!this.active) // attempt to do the first read
+    {
+        makeActive();
+    }
     int len = readReplyLen();
     if (len==0) {
       this.closed = true;
@@ -143,6 +195,7 @@ public class PlainConnection {
         closeConnection();
         return rslt;
       }
+
       rslt = new byte[dataLen];
       for (int i=0; i<dataLen; i++) rslt[i] = dis.readByte();
       int cursorLen = dis.readInt();
@@ -156,15 +209,16 @@ public class PlainConnection {
       throw new HpccFileException("Error during read block", e);
     }
     if (this.simulateFail) this.handle = -1;
-    String handleTrans = this.getHandleTrans();
+    String readAheadTrans = (this.forceCursorUse)
+                          ? this.getCursorTrans()
+                          : this.getHandleTrans();
     try  {
-      int lenHandleTrans = handleTrans.length();
-      Charset charset = Charset.forName("ISO-8859-1");
-      this.dos.writeInt(lenHandleTrans);
-      this.dos.write(handleTrans.getBytes(charset),0,lenHandleTrans);
+      int lenTrans = readAheadTrans.length();
+      this.dos.writeInt(lenTrans);
+      this.dos.write(readAheadTrans.getBytes(HPCCCharSet),0,lenTrans);
       this.dos.flush();
     } catch (IOException e) {
-      throw new HpccFileException("Failure on handle transaction", e);
+      throw new HpccFileException("Failure sending read ahead transaction", e);
     }
     return rslt;
   }
@@ -172,53 +226,127 @@ public class PlainConnection {
    * Open client socket to the primary and open the streams
    * @throws HpccFileException
    */
-  private void makeActive() throws HpccFileException{
+  private void makeActive() throws HpccFileException
+  {
     this.active = false;
     this.handle = 0;
     this.cursorBin = new byte[0];
-    try {
-      sock = new java.net.Socket(this.getIP(), this.filePart.getClearPort());
-    } catch (java.net.UnknownHostException e) {
-      throw new HpccFileException("Bad file part addr "+this.getIP(), e);
-    } catch (java.io.IOException e) {
-      throw new HpccFileException(e);
-    }
-    try {
-      this.dos = new java.io.DataOutputStream(sock.getOutputStream());
-      this.dis = new java.io.DataInputStream(sock.getInputStream());
-    } catch (java.io.IOException e) {
-      throw new HpccFileException("Failed to create streams", e);
-    }
-    this.active = true;
-    try {
-      Charset charset = Charset.forName("ISO-8859-1");
-      String readTrans = makeInitialRequest();
-      int transLen = readTrans.length();
-      this.dos.writeInt(transLen);
-      this.dos.write(readTrans.getBytes(charset),0,transLen);
-      this.dos.flush();
-    } catch (IOException e) {
-      throw new HpccFileException("Failed on initial remote read read trans", e);
+    
+    while (true)
+    {
+        try
+        {
+            log.debug("Attempting to connect to file part : '" + dataPart.getThisPart() + "' Copy: '" + (currentFilePartCopyIndex+1) + "' on IP: '" + getIP() + "'");
+
+            try
+            {
+                if (getUseSSL())
+                {
+                    SSLSocketFactory ssf = (SSLSocketFactory) SSLSocketFactory.getDefault();
+                    sock = (SSLSocket)ssf.createSocket();
+                    sock.connect(new InetSocketAddress(this.getIP(), this.dataPart.getPort()), DEFAULT_CONNECT_TIMEOUT_MILIS );
+
+                    log.debug("Attempting SSL handshake...");
+                    ((SSLSocket) sock).startHandshake();
+                    log.debug("SSL handshake successful...");
+                    log.debug("   Remote address = " + sock.getInetAddress().toString() + " Remote port = " + sock.getPort());
+                }
+                else
+                {
+                    SocketFactory sf = SocketFactory.getDefault();
+                    sock = sf.createSocket();
+                    sock.connect(new InetSocketAddress(this.getIP(), this.dataPart.getPort()), DEFAULT_CONNECT_TIMEOUT_MILIS );
+                }
+                log.debug("Connected: Remote address = " + sock.getInetAddress().toString() + " Remote port = " + sock.getPort());
+            }
+            catch (java.net.UnknownHostException e)
+            {
+              throw new HpccFileException("Bad file part addr "+this.getIP(), e);
+            }
+            catch (java.io.IOException e)
+            {
+              throw new HpccFileException(e);
+            }
+
+            try
+            {
+              this.dos = new java.io.DataOutputStream(sock.getOutputStream());
+              this.dis = new java.io.DataInputStream(sock.getInputStream());
+            }
+            catch (java.io.IOException e)
+            {
+              throw new HpccFileException("Failed to create streams", e);
+            }
+            this.active = true;
+            try
+            {
+              String readTrans = makeInitialRequest();
+              int transLen = readTrans.length();
+              this.dos.writeInt(transLen);
+              this.dos.write(readTrans.getBytes(HPCCCharSet),0,transLen);
+              this.dos.flush();
+            }
+            catch (IOException e)
+            {
+              throw new HpccFileException("Failed on initial remote read read trans", e);
+            }
+            return;
+        }
+        catch (Exception e)
+        {
+            log.error("Could not reach file part: '" + dataPart.getThisPart() + "' copy: '" + (currentFilePartCopyIndex+1) + "' on IP: '" + getIP());
+            log.error(e.getMessage());
+
+             if (!setNextFilePartCopy())
+                throw new HpccFileException("Unsuccessfuly attempted to connect to all file part copies", e); // this should be a multi exception
+        }
     }
   }
+
   /**
    * Creates a request string using the record definition, filename,
    * and current state of the file transfer.
    * @return JSON request string
    */
   private String makeInitialRequest() {
+    StringBuilder sb = new StringBuilder(100
+        + this.recordDefinition.getJsonInputDef().length()
+        + this.recordDefinition.getJsonOutputDef().length());
+    sb.append(RFCCodes.RFCStreamReadCmd);
+    sb.append("{ \"format\" : \"binary\", \n");
+    sb.append("\"replyLimit\" : " + PlainConnection.MaxReadSizeKB + ",\n");
+    sb.append(makeNodeObject());
+    sb.append("\n}\n");
+    return sb.toString();
+  }
+  /**
+   * Make the node part of the JSON request string
+   * @return Json
+   */
+  private String makeNodeObject() {
     StringBuilder sb = new StringBuilder(50
-        + this.filePart.getFilename().length()
-        + this.recDef.getJsonInputDef().length()
-        + this.recDef.getJsonOutputDef().length());
-    sb.append("{ \"format\" : \"binary\", \"node\" : ");
-    sb.append("{\n \"kind\" : \"diskread\",\n \"fileName\" : \"");
-    sb.append(this.filePart.getFilename());
-    sb.append("\",\n \"input\" : ");
-    sb.append(this.recDef.getJsonInputDef());
+        + this.recordDefinition.getJsonInputDef().length()
+        + this.recordDefinition.getJsonOutputDef().length());
+    sb.append(" \"node\" : {\n ");
+    //sb.append("{\n \"kind\" : \"");
+    //sb.append((this.dataPart.isIndex())? "indexread"  : "diskread");
+    //sb.append("\",\n \"metaInfo\" : \"");
+    sb.append("\"metaInfo\" : \"");
+    sb.append(this.dataPart.getFileAccessBlob());
+    sb.append("\",\n \"filePart\" : \"");
+    sb.append(this.dataPart.getThisPart());
+    sb.append("\", \n");
+    if (!this.dataPart.getFilter().isEmpty()) {
+      sb.append(" ");
+      sb.append(this.dataPart.getFilter().toJsonObject());
+      sb.append(",\n");
+    }
+
+    sb.append("\n \"input\" : ");
+    sb.append(this.recordDefinition.getJsonInputDef());
     sb.append(", \n \"output\" : ");
-    sb.append(this.recDef.getJsonOutputDef());
-    sb.append("\n }  }\n\n");
+    sb.append(this.recordDefinition.getJsonOutputDef());
+    sb.append("\n }");
     return sb.toString();
   }
   /**
@@ -226,31 +354,28 @@ public class PlainConnection {
    * @return the request as a JSON string
    */
   private String makeHandleRequest() {
-    StringBuilder sb = new StringBuilder();
-    sb.append("{\n  \"format\" : \"binary\", \n  \"cursor\" : \"");
+    StringBuilder sb = new StringBuilder(100);
+    sb.append(RFCCodes.RFCStreamReadCmd);
+    sb.append("{ \"format\" : \"binary\",\n");
+    sb.append("  \"handle\" : \"");
     sb.append(Integer.toString(this.handle));
     sb.append("\" \n}");
+
     return sb.toString();
   }
   private String makeCursorRequest() {
-    StringBuilder sb = new StringBuilder(80
-        + this.filePart.getFilename().length()
-        + this.recDef.getJsonInputDef().length()
-        + this.recDef.getJsonOutputDef().length()
+    StringBuilder sb = new StringBuilder(130
+        + this.recordDefinition.getJsonInputDef().length()
+        + this.recordDefinition.getJsonOutputDef().length()
         + (int)(this.cursorBin.length*1.4));
-    sb.append("{ \"format\" : \"binary\", ");
-    String w = java.util.Base64.getEncoder().encodeToString(this.cursorBin);
-    sb.append("\n   \"cursorBin\" : { \"#valuebin\" : \"");
-    sb.append(w);
-    sb.append("\" }, ");
-    sb.append(" \n \"node\" : ");
-    sb.append("{\n \"kind\" : \"diskread\",\n \"fileName\" : \"");
-    sb.append(this.filePart.getFilename());
-    sb.append("\",\n \"input\" : ");
-    sb.append(this.recDef.getJsonInputDef());
-    sb.append(", \n \"output\" : ");
-    sb.append(this.recDef.getJsonOutputDef());
-    sb.append("\n } }\n\n");
+    sb.append(RFCCodes.RFCStreamReadCmd);
+    sb.append("{ \"format\" : \"binary\",\n");
+    sb.append("\"replyLimit\" : " + PlainConnection.MaxReadSizeKB + ",\n");
+    sb.append(makeNodeObject());
+    sb.append(",\n");
+    sb.append("  \"cursorBin\" : \"");
+    sb.append(java.util.Base64.getEncoder().encodeToString(this.cursorBin));
+    sb.append("\" \n}\n");
     return sb.toString();
   }
   /**
@@ -282,27 +407,43 @@ public class PlainConnection {
         hi_flag = true;
         len &= 0x7FFFFFFF;
       }
-      if (len == 0) return 0;
-      byte flag = dis.readByte();
-      if (flag==hyphen[0]) {
-        if (len<5) throw new HpccFileException("Failed with no message sent");
-        int msgLen = dis.readInt();
-        byte[] msg = new byte[msgLen];
-        this.dis.read(msg);
-        String message = new String(msg, hpccSet);
-        throw new HpccFileException("Failed with " + message);
+
+      if (len == 0)
+          return 0;
+
+      int status = dis.readInt();
+      len -=4; // account for the status int 4-byte
+      if (status != RFCCodes.RFCStreamNoError)
+      {
+            StringBuilder sb = new StringBuilder();
+            sb.append("\nReceived ERROR from Thor node (");
+            sb.append(this.getIP());
+            sb.append("): Code: '");
+            sb.append(status);
+            sb.append("'");
+
+            if (len > 0)
+            {
+                byte[] message = new byte[len];
+                dis.readFully(message, 0, len);
+                sb.append(" Message: '");
+                sb.append(new String(message));
+                sb.append("'");
+            }
+
+            switch (status)
+            {
+            case RFCCodes.DAFSERR_cmdstream_invalidexpiry:
+                sb.append("\nInvalid file access expiry reported - change File Access Expiry (HPCCFile) and retry");
+                break;
+            case RFCCodes.DAFSERR_cmdstream_authexpired:
+                sb.append("\nFile access expired before initial request - Retry and consider increasing File Access Expiry (HPCCFile)");
+                break;
+            default:
+                break;
+            }
+            throw new HpccFileException(sb.toString());
       }
-      if (flag != uc_J[0]) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("Invalid response of ");
-        sb.append(String.format("%02X ", flag));
-        sb.append("received from THOR node ");
-        sb.append(this.getIP());
-        sb.append(" and return length hi-bit was ");
-        sb.append(hi_flag);
-        throw new HpccFileException(sb.toString());
-      }
-      len--;  // account for flag byte read
     } catch (IOException e) {
       throw new HpccFileException("Error during read block", e);
     }
@@ -317,9 +458,8 @@ public class PlainConnection {
     String retryTrans = this.makeCursorRequest();
     int len = retryTrans.length();
     try {
-      Charset charset = Charset.forName("ISO-8859-1");
       this.dos.writeInt(len);
-      this.dos.write(retryTrans.getBytes(charset),0,len);
+      this.dos.write(retryTrans.getBytes(HPCCCharSet),0,len);
       this.dos.flush();
     } catch (IOException e) {
       throw new HpccFileException("Failed on remote read read retry", e);

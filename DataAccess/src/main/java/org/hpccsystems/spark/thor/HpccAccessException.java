@@ -16,26 +16,46 @@
 package org.hpccsystems.spark.thor;
 
 /**
- * This exception is thrown with the data definition cannot be
- * used to retrieve or describe the data.  The caller will need
- * to use a different file.
+ * Non-specific exception accessing the HPCC cluster.
  */
-public class UnusableDataDefinitionException extends Exception {
+public class HpccAccessException extends Exception {
+  static public final long serialVersionUID = 1L;
   /**
-   * @param message a message explaining the condition
+   * A marker object for an exception during the access of an HPCC based file.
    */
-  public UnusableDataDefinitionException(String message) {
+  public HpccAccessException() {
+  }
+
+  /**
+   * @param message
+   */
+  public HpccAccessException(String message) {
     super(message);
   }
+
   /**
    * @param cause
    */
+  public HpccAccessException(Throwable cause) {
+    super(cause);
+  }
+
   /**
-   * @param message a message explaining the condition
-   * @param cause an exception that motivated this exception
+   * @param message
+   * @param cause
    */
-  public UnusableDataDefinitionException(String message, Throwable cause) {
+  public HpccAccessException(String message, Throwable cause) {
     super(message, cause);
+  }
+
+  /**
+   * @param message
+   * @param cause
+   * @param enableSuppression
+   * @param writableStackTrace
+   */
+  public HpccAccessException(String message, Throwable cause, boolean enableSuppression, boolean writableStackTrace) {
+    super(message, cause, enableSuppression, writableStackTrace);
   }
 
 }

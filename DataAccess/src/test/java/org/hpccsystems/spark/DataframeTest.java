@@ -1,16 +1,19 @@
 package org.hpccsystems.spark;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.util.Arrays;
+
 //import scala.collection.mutable.ArraySeq;
 import org.apache.spark.SparkConf;
-import org.apache.spark.sql.SparkSession;
-import org.apache.spark.sql.Row;
-import org.hpccsystems.spark.thor.RemapInfo;
 import org.apache.spark.sql.Dataset;
-import scala.collection.Seq;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
+import org.hpccsystems.spark.thor.DataPartition;
+import org.hpccsystems.spark.thor.RemapInfo;
+
 import scala.collection.JavaConverters;
-import java.util.Arrays;
-import java.io.InputStreamReader;
-import java.io.BufferedReader;
+import scala.collection.Seq;
 
 public class DataframeTest {
 
@@ -57,6 +60,9 @@ public class DataframeTest {
     System.out.print("pass word: ");
     System.out.flush();
     String pword = br.readLine();
+    System.out.print("Field list or empty: ");
+    System.out.flush();
+    String fieldList = br.readLine();
     System.out.print("Number of nodes for remap or empty: ");
     System.out.flush();
     String nodes = br.readLine();
@@ -65,14 +71,14 @@ public class DataframeTest {
     String base_ip = br.readLine();
     HpccFile hpcc;
     if (nodes.equals("") || base_ip.equals("")) {
-      hpcc = new HpccFile(testName, protocol, esp_ip, port, user, pword);
+      hpcc = new HpccFile(testName, protocol, esp_ip, port, user, pword, fieldList, 0);
     } else {
       RemapInfo ri = new RemapInfo(Integer.parseInt(nodes), base_ip);
-      hpcc = new HpccFile(testName, protocol, esp_ip, port, user, pword, ri);
+      hpcc = new HpccFile(testName, protocol, esp_ip, port, user, pword, fieldList, ri, 0);
     }
     System.out.println("Getting file parts");
-    FilePart[] parts = hpcc.getFileParts();
-    for (FilePart p : parts) System.out.println(p.toString());
+    DataPartition[] parts = hpcc.getFileParts();
+    for (DataPartition p : parts) System.out.println(p.toString());
     System.out.println("Getting record definition");
     RecordDef rd = hpcc.getRecordDefinition();
     System.out.println(rd.toString());

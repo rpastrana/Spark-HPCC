@@ -1,30 +1,22 @@
 package org.hpccsystems.spark;
 
-import org.apache.spark.SparkConf;
-import org.apache.spark.SparkContext;
-import org.apache.spark.rdd.RDD;
-import org.apache.spark.mllib.regression.LabeledPoint;
-import org.apache.spark.mllib.classification.LogisticRegressionWithLBFGS;
-import org.apache.spark.mllib.classification.LogisticRegressionModel;
-import org.apache.spark.mllib.evaluation.MulticlassMetrics;
-import org.apache.spark.api.java.JavaRDD;
-import org.apache.spark.api.java.function.Function;
-import scala.collection.Seq;
-import scala.collection.JavaConverters;
-import scala.Tuple2;
-import scala.reflect.ClassTag;
-import scala.reflect.ClassTag$;
-import org.hpccsystems.spark.HpccFile;
-import org.hpccsystems.spark.thor.RemapInfo;
-import java.util.Arrays;
-import java.io.InputStreamReader;
 import java.io.BufferedReader;
 //
+import java.io.InputStreamReader;
+import java.util.Arrays;
+
+import org.apache.spark.SparkConf;
+import org.apache.spark.SparkContext;
+import org.apache.spark.sql.Row;
+import org.hpccsystems.spark.thor.DataPartition;
+import org.hpccsystems.spark.thor.RemapInfo;
+
+import scala.collection.JavaConverters;
+import scala.collection.Seq;
 
 
 /**
- * Test from to test RDD by reading the data and running Logistic Regression.
- * @author holtjd
+ * Test from to test RDD by reading the data and writing it to the console.
  *
  */
 public class RDDTest {
@@ -36,7 +28,7 @@ public class RDDTest {
     System.out.flush();
     String sparkHome = br.readLine();
     conf.setSparkHome(sparkHome);
-    System.out.print("Fiull path to JAPI jar: ");
+    System.out.print("Full path to JAPI jar: ");
     System.out.flush();
     String japi_jar = br.readLine();
     System.out.print("Full path to Spark-HPCC jar: ");
@@ -68,6 +60,9 @@ public class RDDTest {
     System.out.print("pass word: ");
     System.out.flush();
     String pword = br.readLine();
+    System.out.print("Field list or empty: ");
+    System.out.flush();
+    String fieldList = br.readLine();
     System.out.print("Number of nodes for remap or empty: ");
     System.out.flush();
     String nodes = br.readLine();
@@ -76,48 +71,26 @@ public class RDDTest {
     String base_ip = br.readLine();
     HpccFile hpcc;
     if (nodes.equals("") || base_ip.equals("")) {
-      hpcc = new HpccFile(testName, protocol, esp_ip, port, user, pword);
+      hpcc = new HpccFile(testName,protocol,esp_ip,port,user,pword,fieldList,0);
     } else {
       RemapInfo ri = new RemapInfo(Integer.parseInt(nodes), base_ip);
-      hpcc = new HpccFile(testName, protocol, esp_ip, port, user, pword, ri);
+      hpcc = new HpccFile(testName, protocol, esp_ip, port, user, pword,
+          fieldList, ri, 0);
     }
     System.out.println("Getting file parts");
-    FilePart[] parts = hpcc.getFileParts();
+    DataPartition[] parts = hpcc.getFileParts();
     System.out.println("Getting record definition");
     RecordDef rd = hpcc.getRecordDefinition();
     System.out.println(rd.toString());
     System.out.println("Creating RDD");
     HpccRDD myRDD = new HpccRDD(sc, parts, rd);
     System.out.println("Getting local iterator");
-    scala.collection.Iterator<Record> rec_iter = myRDD.toLocalIterator();
+    scala.collection.Iterator<Row> rec_iter = myRDD.toLocalIterator();
     while (rec_iter.hasNext()) {
-      Record rec = rec_iter.next();
+      Row rec = rec_iter.next();
       System.out.println(rec.toString());
     }
     System.out.println("Completed output of Record data");
-    System.out.println("Convert to labeled point and run logistic regression");
-    String[] names = {"petal_length","petal_width", "sepal_length", "sepal_width"};
-    RDD<LabeledPoint> lpRDD = myRDD.makeMLLibLabeledPoint("class", names);
-    LogisticRegressionWithLBFGS lr  = new LogisticRegressionWithLBFGS();
-    lr.setNumClasses(3);
-    LogisticRegressionModel iris_model = lr.run(lpRDD);
-    System.out.println(iris_model.toString());
-    System.out.println("Generate confusion matrix");
-    Function<LabeledPoint, Tuple2<Object, Object>> my_f
-      = new Function<LabeledPoint, Tuple2<Object, Object>>() {
-      static private final long serialVersionUID = 1L;
-      public Tuple2<Object, Object> call(LabeledPoint lp) {
-        Double label = new Double(lp.label());
-        Double predict = new Double(iris_model.predict(lp.features()));
-        return new Tuple2<Object, Object>(predict, label);
-      }
-    };
-    ClassTag<LabeledPoint> typ = ClassTag$.MODULE$.apply(LabeledPoint.class);
-    JavaRDD<LabeledPoint> lpJavaRDD = new JavaRDD<LabeledPoint>(lpRDD, typ);
-    RDD<Tuple2<Object, Object>> predAndLabelRDD = lpJavaRDD.map(my_f).rdd();
-    MulticlassMetrics metrics = new MulticlassMetrics(predAndLabelRDD);
-    System.out.println("Confusion matrix:");
-    System.out.println(metrics.confusionMatrix());
     System.out.println("End of run");
   }
 }

@@ -1,29 +1,41 @@
+/*******************************************************************************
+ *     HPCC SYSTEMS software Copyright (C) 2018 HPCC Systems®.
+ *
+ *     Licensed under the Apache License, Version 2.0 (the "License");
+ *     you may not use this file except in compliance with the License.
+ *     You may obtain a copy of the License at
+ *
+ *        http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *     Unless required by applicable law or agreed to in writing, software
+ *     distributed under the License is distributed on an "AS IS" BASIS,
+ *     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *     See the License for the specific language governing permissions and
+ *     limitations under the License.
+ *******************************************************************************/
 package org.hpccsystems.spark;
 
 import java.io.Serializable;
-import java.util.HashMap;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.Iterator;
 
+import com.fasterxml.jackson.core.JsonParseException;
+import com.fasterxml.jackson.core.JsonToken;
+
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
 import org.hpccsystems.spark.thor.DefToken;
 import org.hpccsystems.spark.thor.FieldDef;
 import org.hpccsystems.spark.thor.HpccSrcType;
 import org.hpccsystems.spark.thor.TypeDef;
 import org.hpccsystems.spark.thor.UnusableDataDefinitionException;
 
-import com.fasterxml.jackson.core.JsonParseException;
-import com.fasterxml.jackson.core.JsonToken;
-
-import org.apache.spark.sql.types.StructField;
-import org.apache.spark.sql.types.StructType;
-import org.apache.spark.sql.types.Metadata;
-import org.apache.spark.sql.types.DataTypes;
-import org.apache.spark.sql.types.DataType;
-
 /**
  * HPCC record definition.  Includes HPCC record info strings and derived
  * Field Defs.
- * @author holtjd
  *
  */
 public class RecordDef implements Serializable {
@@ -52,14 +64,16 @@ public class RecordDef implements Serializable {
   /**
    * Construct a record definition.  Normally used by the static
    * function parseJsonDef.
-   * @param def the Json string used as the input and default output
-   * definition.
+   * @param defThor the Json string used as the input definition for
+   * the data on THOR.
+   * @param defContent the Json string used to define the data to be
+   * sent to this client.
    * @param root the definition parsed into FieldDef objects.  The input
    * is the root definition for the record.
    */
-  public RecordDef(String def, FieldDef root) {
-    this.input_def = def;
-    this.output_def = def;  // default output is all content
+  public RecordDef(String defThor, String defContent, FieldDef root) {
+    this.input_def = defThor;
+    this.output_def = defContent;
     this.root = root;
   }
   /**
@@ -67,18 +81,26 @@ public class RecordDef implements Serializable {
    * string.  We have a type definition object composed by one or
    * more type definition object pairs.  The top level type definition
    * has fieldType, length, and fields pairs.
-   * @param def the JSON record type defintion returned from WsDfu
+   * @param defThor the JSON record type definition returned from WsDfu
+   * @param cp a column pruner for selecting specific columns of datga
    * @return a new record definition
    */
-  static public RecordDef parseJsonDef(String def)
+  static public RecordDef fromJsonDef(String defThor, ColumnPruner cp)
       throws UnusableDataDefinitionException {
-    ArrayList<DefToken> toks = new ArrayList<DefToken>();
+    DefToken[] toks = new DefToken[0];
     try {
-      toks = DefToken.parseDefString(def);
+      toks = DefToken.parseDefString(defThor);
     } catch (JsonParseException e) {
       throw new UnusableDataDefinitionException("Failed to parse def", e);
     }
-    Iterator<DefToken> toks_iter = toks.iterator();
+    toks = cp.pruneDefTokens(toks);
+    StringBuilder def_sb = new StringBuilder();
+    Iterator<DefToken> toks_iter = Arrays.asList(toks).iterator();
+    while (toks_iter.hasNext()) {
+      def_sb.append(toks_iter.next().toJson());
+    }
+    String defContent = def_sb.toString();
+    toks_iter = Arrays.asList(toks).iterator();
     HashMap<String, TypeDef> types = new HashMap<String, TypeDef>();
     ArrayList<FieldDef> record_fields = new ArrayList<FieldDef>();
     // have an unnamed type definition object with 1 or more pairs of
@@ -89,7 +111,6 @@ public class RecordDef implements Serializable {
     }
     long len = 0;
     long type_id = 0;
-    long childLen = 0;
     DefToken curr = toks_iter.next();
     if (curr.getToken() != JsonToken.START_OBJECT
         || curr.getName() != null) {
@@ -144,11 +165,6 @@ public class RecordDef implements Serializable {
         }
       } else if (fieldLengthName.equals(curr.getName())) {
         len = curr.getInteger();
-      } else if (childName.equals(curr.getName())) {
-        String childTypeName = curr.getString();
-        if (types.containsKey(childTypeName)) {
-          childLen = types.get(childTypeName).childLen();
-        }
       }
       curr = toks_iter.next();
     }
@@ -163,9 +179,9 @@ public class RecordDef implements Serializable {
     }
     // create record def
     FieldDef root = new FieldDef("root", FieldType.RECORD, "none",
-        len, childLen, type_id==type_record, HpccSrcType.UNKNOWN,
+        len, type_id==type_record, HpccSrcType.UNKNOWN,
         record_fields.toArray(new FieldDef[0]));
-    RecordDef rslt = new RecordDef(def, root);
+    RecordDef rslt = new RecordDef(defThor, defContent, root);
     return rslt;
   }
   /**
@@ -180,16 +196,6 @@ public class RecordDef implements Serializable {
    */
   public String getJsonOutputDef() { return output_def; }
   /**
-   * Replace the current output definition.
-   * @param new_def the new definition, a JSON string
-   * @return the prior definition
-   */
-  public String setJsonOutputDef(String new_def) {
-    String old = this.output_def;
-    this.output_def = new_def;
-    return old;
-  }
-  /**
    * The record definition object
    * @return root definition
    */
@@ -202,10 +208,6 @@ public class RecordDef implements Serializable {
     return "RECORD: " + root.toString();
   }
   public StructType asSchema() {
-    StructField[] fields = new StructField[this.root.getNumDefs()];
-    for (int i=0; i<this.root.getNumDefs(); i++) {
-      fields[i] = this.root.getDef(i).asSchemaElement();
-    }
-    return DataTypes.createStructType(fields);
+    return this.root.asSchema();
   }
 }
